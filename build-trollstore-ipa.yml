@@ -1,0 +1,88 @@
+name: Build TrollStore IPA
+
+# Mac を持っていなくても、GitHub の macOS ランナー (本物の Mac + Xcode) で
+# 無署名 IPA をビルドする。公開リポジトリでは標準ランナーは無料。
+# リポジトリにプロジェクト一式を置いても、ShortcutDowngrader15.zip を
+# 1 個置いただけでも動く (zip は自動で展開する)。
+
+on:
+  push:
+    branches: [ main ]
+    # ワークフローだけ作った時点では走らせない。ZIP/プロジェクトを置いた
+    # push のときだけ自動ビルドする (作った直後の「赤いバツ」を防ぐため)。
+    paths:
+      - 'ShortcutDowngrader15.zip'
+      - 'ShortcutDowngrader15/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Unpack project zip if needed
+        run: |
+          if ! find . -name "ShortcutDowngrader15.xcodeproj" -maxdepth 4 | grep -q .; then
+            ZIP=$(ls *.zip 2>/dev/null | head -1)
+            if [ -z "$ZIP" ]; then
+              echo "プロジェクトも zip も見つかりません" >&2
+              exit 1
+            fi
+            unzip -o "$ZIP"
+          fi
+          PROJ=$(find . -name "ShortcutDowngrader15.xcodeproj" -maxdepth 4 | head -1)
+          echo "PROJ_PATH=$PROJ" >> "$GITHUB_ENV"
+          echo "Using project: $PROJ"
+          ls -la
+
+      - name: Show Xcode version
+        run: |
+          ls /Applications | grep -i Xcode || true
+          xcodebuild -version
+
+      - name: Build unsigned app
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project "$PROJ_PATH" \
+            -scheme ShortcutDowngrader15 \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath "$RUNNER_TEMP/DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      - name: Package TrollStore IPA
+        run: |
+          APP=$(find "$RUNNER_TEMP/DerivedData/Build/Products" -name "ShortcutDowngrader15.app" -maxdepth 2 | head -1)
+          if [ -z "$APP" ]; then
+            echo ".app が生成されませんでした" >&2
+            exit 1
+          fi
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry ShortcutDowngrader15.tipa Payload
+          cp ShortcutDowngrader15.tipa ShortcutDowngrader15.ipa
+          ls -lh ShortcutDowngrader15.tipa
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ShortcutDowngrader15-tipa
+          path: |
+            ShortcutDowngrader15.tipa
+            ShortcutDowngrader15.ipa
+          if-no-files-found: error
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: ${{ runner.temp }}/build.log
+          if-no-files-found: ignore
